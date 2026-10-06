@@ -250,7 +250,7 @@ window.addEventListener('error', function(ev){
 <header>
   <div>
     <h1>📅 График отпусков Проектного Офиса</h1>
-    <div class="sub">Проектный офис — перетаскивайте полосы за центр или края, кликните для правки · <b id="buildTag" style="color:var(--accent2)"
+    <div class="sub">Проектный офис — перетаскивайте полосы за центр или края, кликните для правки
   </div>
   <div class="spacer"></div>
   <span class="badge" id="connBadge" title="Статус синхронизации"><span class="live"></span><span id="connText">Локально</span></span>
@@ -353,7 +353,30 @@ window.addEventListener('error', function(ev){
     </div>
   </div>
 </div>
-
+<!-- Экран входа: показывается, пока пользователь не авторизован -->
+<div class="overlay show" id="authOverlay" style="z-index:120">
+  <div class="modal">
+    <h3>🔐 Вход в график отпусков</h3>
+    <p class="hint">График доступен только сотрудникам Проектного офиса. Введите рабочую почту и пароль.</p>
+    <div class="field">
+      <label>Email</label>
+      <input type="email" id="authEmail" placeholder="name@company.ru" autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Пароль</label>
+      <input type="password" id="authPass" placeholder="••••••••" autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label>Ваше имя (для подписи правок)</label>
+      <input type="text" id="authName" placeholder="например: Кристина">
+    </div>
+    <div class="calc" id="authMsg" style="color:var(--warn)"></div>
+    <div class="modal-actions">
+      <button class="btn primary" id="authSignIn" style="flex:1;justify-content:center">Войти</button>
+    </div>
+  </div>
+</div>
+  
 <div class="toast" id="toast"></div>
 
 <script src="config.js"></script>
@@ -1415,33 +1438,110 @@ document.getElementById('sConnect').onclick=()=>{ LS.del('iskra_vac_sync_disable
 document.getElementById('sDisconnect').onclick=()=>{ disconnect(); document.getElementById('syncOverlay').classList.remove('show'); };
 document.getElementById('syncOverlay').addEventListener('click',e=>{ if(e.target.id==='syncOverlay') e.currentTarget.classList.remove('show'); });
 
-/* ================= INIT ================= */
+/* ================= ИНИЦИАЛИЗАЦИЯ И АВТОРИЗАЦИЯ ================= */
 loadLocal(); fillEmpSelect();
 if((location.hash||'').indexOf('cal')>=0){ viewMode='calendar'; }
 refitZoom(); render(); setConn('off','Локально');
 markPreset(viewMode==='calendar'?0:activeSpanDays); updatePeriodLabel();
-// общий доступ: конфиг из config.js (window.VAC_SYNC_CONFIG) либо из сохранённой сессии браузера
-(function(){ const cfg=resolveCfg(); if(cfg && cfg.databaseURL && LS.get('iskra_vac_sync_disabled')!=='1'){
-  const savedName=LS.get(NAME_KEY)||'';
-  document.getElementById('sName').value=savedName;
-  document.getElementById('sApiKey').value=cfg.apiKey||''; document.getElementById('sAuth').value=cfg.authDomain||'';
-  document.getElementById('sDbUrl').value=cfg.databaseURL||''; document.getElementById('sRoom').value=cfg.room||'';
-  // Авто-вход в общую комнату: не ждём имени и не перекрываем график модалкой.
-  // Имя подставляем из памяти, иначе гостевое — и сразу подключаемся.
-  const guest = savedName || ('Гость-' + Math.random().toString(36).slice(2,5).toUpperCase());
-  document.getElementById('sName').value = guest;
-  if(!savedName) LS.set(NAME_KEY, guest);
-  autoJoin();
-} })();
-// Подключение к общей базе без участия пользователя; при неудаче — тихо остаёмся локально.
-async function autoJoin(){
-  const cfg=resolveCfg(); if(!cfg || !cfg.databaseURL) return;
-  try{
-    const ok=await ensureFirebase(); if(!ok) return;
-    await connect({silent:true});
-  }catch(e){ /* молча: график уже нарисован локально */ }
+
+/* --- Firebase Auth: вход по email/паролю --- */
+let auth = null;
+
+async function initAuth(){
+  const cfg = resolveCfg();
+  if(!cfg || !cfg.databaseURL){
+    // Без конфига — работаем как раньше (локально), но без синхронизации.
+    document.getElementById('authOverlay').classList.remove('show');
+    return;
+  }
+  const ok = await ensureFirebase();
+  if(!ok){
+    document.getElementById('authMsg').textContent =
+      'Не удалось загрузить Firebase SDK. Проверьте сеть.';
+    return;
+  }
+  if(!window.firebase.auth){
+    document.getElementById('authMsg').textContent =
+      'Модуль авторизации не загружен. Проверьте подключение firebase-auth-compat.js.';
+    return;
+  }
+  sync.app = window.firebase.apps.find(a => a.options.databaseURL === cfg.databaseURL)
+          || window.firebase.initializeApp(cfg, 'vacation-' + uid());
+  auth = window.firebase.auth(sync.app);
+
+  // Следим за состоянием входа
+  auth.onAuthStateChanged(user => {
+    const overlay = document.getElementById('authOverlay');
+    if(user){
+      overlay.classList.remove('show');
+      // Сохраняем имя, если пользователь его указал, иначе берём из email
+      const nameInput = document.getElementById('authName').value.trim();
+      const savedName = LS.get(NAME_KEY);
+      const finalName = nameInput || savedName || (user.email || '').split('@')[0] || 'Сотрудник';
+      LS.set(NAME_KEY, finalName);
+      document.getElementById('sName').value = finalName;
+      // Подключаемся к базе только после входа
+      connect({silent:true});
+    } else {
+      // Не вошёл — показываем экран входа и отключаем синхронизацию
+      disconnectSilent();
+      overlay.classList.add('show');
+      document.getElementById('authEmail').focus();
+    }
+  });
 }
-window.addEventListener('beforeunload', ()=>{ if(sync.on && sync.refPresence){ try{ sync.refPresence.child(sync.clientId).remove(); }catch(e){} } });
+
+function disconnectSilent(){
+  // Мягкое отключение без тоста и без сброса LS-флага
+  ++sync.generation;
+  sync.unsubs.splice(0).forEach(off => { try{ off(); }catch(e){} });
+  clearInterval(sync._hb);
+  if(sync.refPresence) sync.refPresence.child(sync.clientId).remove().catch(()=>{});
+  sync.on = false; sync.db = null;
+  sync.refLeaves = sync.refLog = sync.refPresence = null;
+  sync.shadow = {};
+  setConnecting(false);
+  setConn('off', 'Вход не выполнен');
+  renderOnline([]); renderFeed([]);
+}
+
+/* Кнопка входа */
+document.getElementById('authSignIn').onclick = async () => {
+  const msg = document.getElementById('authMsg');
+  msg.textContent = '';
+  const email = document.getElementById('authEmail').value.trim();
+  const pass  = document.getElementById('authPass').value;
+  if(!email || !pass){ msg.textContent = 'Введите email и пароль'; return; }
+  const name  = document.getElementById('authName').value.trim();
+  if(name) LS.set(NAME_KEY, name);
+  try{
+    await auth.signInWithEmailAndPassword(email, pass);
+  }catch(e){
+    const map = {
+      'auth/invalid-email': 'Некорректный email',
+      'auth/user-not-found': 'Пользователь не найден',
+      'auth/wrong-password': 'Неверный пароль',
+      'auth/too-many-requests': 'Слишком много попыток, попробуйте позже',
+      'auth/invalid-credential': 'Неверный email или пароль',
+      'auth/network-request-failed': 'Нет сети'
+    };
+    msg.textContent = map[e.code] || ('Ошибка входа: ' + e.message);
+  }
+};
+
+// Enter в любом поле — войти
+['authEmail','authPass','authName'].forEach(id=>{
+  document.getElementById(id).addEventListener('keydown', e=>{
+    if(e.key === 'Enter') document.getElementById('authSignIn').click();
+  });
+});
+
+// Запускаем проверку авторизации
+initAuth();
+
+window.addEventListener('beforeunload', ()=>{
+  if(sync.on && sync.refPresence){ try{ sync.refPresence.child(sync.clientId).remove(); }catch(e){} }
+});
 </script>
 </body>
 </html>
