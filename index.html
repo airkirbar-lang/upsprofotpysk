@@ -1515,6 +1515,16 @@ document.getElementById('authSignIn').onclick = async () => {
   const name  = document.getElementById('authName').value.trim();
   if(name) LS.set(NAME_KEY, name);
   try{
+    // Всегда берём актуальный экземпляр auth напрямую из firebase,
+    // не полагаясь на переменную `auth`, которая могла ещё не заполниться.
+    const cfg = resolveCfg();
+    if(!cfg || !cfg.databaseURL){ msg.textContent = 'Не настроен Firebase (нет databaseURL)'; return; }
+    const ok = await ensureFirebase();
+    if(!ok){ msg.textContent = 'Firebase SDK не загрузился'; return; }
+    const app = window.firebase.apps.find(a => a.options.databaseURL === cfg.databaseURL)
+             || window.firebase.initializeApp(cfg, 'vacation-' + uid());
+    sync.app = app;
+    auth = window.firebase.auth(app);          // заполняем глобальную переменную
     await auth.signInWithEmailAndPassword(email, pass);
   }catch(e){
     const map = {
@@ -1523,9 +1533,11 @@ document.getElementById('authSignIn').onclick = async () => {
       'auth/wrong-password': 'Неверный пароль',
       'auth/too-many-requests': 'Слишком много попыток, попробуйте позже',
       'auth/invalid-credential': 'Неверный email или пароль',
-      'auth/network-request-failed': 'Нет сети'
+      'auth/network-request-failed': 'Нет сети',
+      'auth/operation-not-allowed': 'Включите Email/Password в Firebase Console → Authentication → Sign-in method',
+      'auth/api-key-not-valid': 'Неверный apiKey в config.js'
     };
-    msg.textContent = map[e.code] || ('Ошибка входа: ' + e.message);
+    msg.textContent = map[e.code] || ('Ошибка входа: ' + (e.message || e.code));
   }
 };
 
