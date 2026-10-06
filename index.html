@@ -378,8 +378,10 @@ window.addEventListener('error', function(ev){
 </div>
   
 <div class="toast" id="toast"></div>
-<script src="config.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="config.js"></script>
 <script>
 /* ================= ДАННЫЕ ================= */
 /* Безопасный доступ к памяти браузера. Если localStorage заблокирован
@@ -1292,12 +1294,13 @@ function loadScript(src){ return new Promise((res,rej)=>{
 }); }
 let firebaseLoading=null;
 async function ensureFirebase(){
-  if(window.firebase&&window.firebase.database) return true;
+  if(window.firebase && window.firebase.database && window.firebase.auth) return true;
   if(!firebaseLoading) firebaseLoading=(async()=>{
     try{
       if(!window.firebase) await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
       if(!window.firebase.database) await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js');
-      return !!window.firebase.database;
+      if(!window.firebase.auth) await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js');
+      return !!(window.firebase.database && window.firebase.auth);
     }catch(e){ return false; }
   })();
   const ok=await firebaseLoading; if(!ok) firebaseLoading=null; return ok;
